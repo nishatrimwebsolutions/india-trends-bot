@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -94,21 +95,34 @@ def build_message(trends, prev, fmt=WHATSAPP):
     return "\n".join(lines)
 
 
+def env(name):
+    """Env var with stray quotes/spaces removed (cmd's `set X="..."` keeps the quotes)."""
+    return os.environ.get(name, "").strip().strip("\"'").strip()
+
+
+def telegram_api(method, data=None):
+    token = env("TELEGRAM_BOT_TOKEN") or sys.exit("Set TELEGRAM_BOT_TOKEN first")
+    if not re.fullmatch(r"\d+:[\w-]{30,}", token):
+        sys.exit("TELEGRAM_BOT_TOKEN looks wrong — it must be the full '1234567890:AA...' token from BotFather")
+    try:
+        with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/{method}", data, timeout=30) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        hint = {401: "token is wrong or was revoked", 404: "token is wrong or incomplete",
+                400: "chat id is wrong, or you haven't pressed Start in your bot"}.get(e.code, "")
+        sys.exit(f"Telegram error {e.code}: {hint}")
+
+
 def send_telegram(text):
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    if not chat_id:
-        sys.exit("Set TELEGRAM_CHAT_ID (run: python trends_bot.py --chat-id)")
+    chat_id = env("TELEGRAM_CHAT_ID") or sys.exit("Set TELEGRAM_CHAT_ID (run: python trends_bot.py --chat-id)")
     data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML",
                                    "disable_web_page_preview": "true"}).encode()
-    with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=30) as r:
-        print("Telegram:", json.load(r).get("ok"))
+    print("Telegram:", telegram_api("sendMessage", data).get("ok"))
 
 
 def print_chat_ids():
     """After you message your bot once, this prints your chat id."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN") or sys.exit("Set TELEGRAM_BOT_TOKEN first")
-    updates = json.loads(fetch(f"https://api.telegram.org/bot{token}/getUpdates"))["result"]
+    updates = telegram_api("getUpdates")["result"]
     chats = {u["message"]["chat"]["id"]: u["message"]["chat"].get("first_name", "")
              for u in updates if "message" in u}
     print(chats or "No messages yet — send your bot any message (e.g. hi) and run again")
@@ -132,7 +146,7 @@ def main():
     if "--chat-id" in sys.argv:
         return print_chat_ids()
     dry_run = "--dry-run" in sys.argv
-    telegram = bool(os.environ.get("TELEGRAM_BOT_TOKEN"))
+    telegram = bool(env("TELEGRAM_BOT_TOKEN"))
     trends = latest_trends(fetch(SOURCE_URL))
     message = build_message(trends, load_previous(), TELEGRAM if telegram else WHATSAPP)
     print(message)

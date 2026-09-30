@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""India X/Twitter Top 10 trends -> WhatsApp (via CallMeBot). Standard library only.
+"""India X/Twitter Top 10 trends -> Telegram (or WhatsApp via CallMeBot). Standard library only.
+
+On Telegram each hour also brings Hindi news drafts (title + 80-100 word description) per trend,
+written by GitHub Models (free, via the workflow's GITHUB_TOKEN) from Google News headlines.
 
 Usage:
-  python trends_bot.py --dry-run   # print the message, don't send, don't save state
-  python trends_bot.py             # send to WhatsApp (needs WHATSAPP_PHONE + CALLMEBOT_APIKEY)
+  python trends_bot.py --dry-run   # print the messages, don't send, don't save state
+  python trends_bot.py --chat-id   # print your Telegram chat id
+  python trends_bot.py             # send
 """
 import html
 import json
@@ -13,6 +17,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 SOURCE_URL = "https://trends24.in/india/"
@@ -20,6 +25,24 @@ STATE_FILE = os.environ.get("STATE_FILE", "state/last.json")
 TOP_N = int(os.environ.get("TOP_N", "10"))
 CLIMB = 3  # places gained since last hour to earn a ⬆️
 IST = timezone(timedelta(hours=5, minutes=30))
+MODEL = os.environ.get("MODEL", "openai/gpt-4.1-mini")
+MODELS_URL = "https://models.github.ai/inference/chat/completions"
+HEADLINES_PER_TREND = 3
+AI_BATCH = 5  # topics per model call (keeps each reply under the free tier's output cap)
+TELEGRAM_LIMIT = 3900  # Telegram max is 4096 chars per message
+
+DRAFT_PROMPT = """You assist a Hindi news desk in India. You get X (Twitter) topics trending in India right now, \
+each with the latest news headlines found for it (possibly empty or unrelated).
+For every topic write, in Hindi (Devanagari):
+- "title": a publishable news headline, max 15 words
+- "description": a news description of 80-100 words
+Rules:
+- Use ONLY facts stated in the given headlines. Never invent names, numbers, quotes, dates or events.
+- If the headlines are empty or don't clearly explain why the topic is trending, set "verified": false, \
+make the title "<topic>: X पर ट्रेंड, वजह अभी साफ नहीं" and in the description say neutrally what is known and \
+what the desk should check. Do not guess.
+- Otherwise set "verified": true.
+Reply with JSON only: {"items": [{"rank": <rank>, "title": "...", "description": "...", "verified": true}]}"""
 
 
 def fetch(url):
@@ -128,6 +151,75 @@ def print_chat_ids():
     print(chats or "No messages yet — send your bot any message (e.g. hi) and run again")
 
 
+def headlines_for(topic):
+    """Latest (last 24h) Google News headlines for a trend: [{title, source, link}]."""
+    q = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", topic.replace("#", "").replace("_", " ")).strip()
+    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": f"{q} when:1d", "hl": "en-IN", "gl": "IN", "ceid": "IN:en"})
+    try:
+        root = ET.fromstring(fetch(url))
+    except Exception as e:
+        print(f"News lookup failed for {topic!r}: {e}")
+        return []
+    return [{"title": it.findtext("title", ""), "source": it.findtext("source", ""),
+             "link": it.findtext("link", "")} for it in root.iter("item")][:HEADLINES_PER_TREND]
+
+
+def ai_drafts(batch):
+    """One GitHub Models call for a batch of topics -> {rank: item}. Empty on any failure."""
+    body = json.dumps({"model": MODEL, "temperature": 0.3, "response_format": {"type": "json_object"},
+                       "messages": [{"role": "system", "content": DRAFT_PROMPT},
+                                    {"role": "user", "content": json.dumps(batch, ensure_ascii=False)}]}).encode()
+    req = urllib.request.Request(MODELS_URL, body, {"Authorization": f"Bearer {env('GITHUB_TOKEN')}",
+                                                    "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            content = json.load(r)["choices"][0]["message"]["content"]
+        items = json.loads(content[content.find("{"):content.rfind("}") + 1])["items"]
+        return {int(it["rank"]): it for it in items}
+    except urllib.error.HTTPError as e:
+        hint = {401: "token missing models permission", 403: "GitHub Models is disabled for this org/repo",
+                429: "free rate limit hit"}.get(e.code, "")
+        print(f"GitHub Models error {e.code}: {hint}")
+    except Exception as e:
+        print(f"GitHub Models reply unusable: {e}")
+    return {}
+
+
+def draft_messages(trends):
+    """Telegram messages with a Hindi title + description per trend, split under the size limit."""
+    news = [headlines_for(t["name"]) for t in trends]
+    drafts = {}
+    if env("GITHUB_TOKEN"):
+        for start in range(0, len(trends), AI_BATCH):
+            batch = [{"rank": r, "topic": trends[r - 1]["name"], "headlines": [n["title"] for n in news[r - 1]]}
+                     for r in range(start + 1, min(start + AI_BATCH, len(trends)) + 1)]
+            drafts.update(ai_drafts(batch))
+    else:
+        print("(GITHUB_TOKEN not set, AI drafts skipped)")
+    if not drafts:
+        return []
+    blocks = []
+    for rank, t in enumerate(trends, 1):
+        d = drafts.get(rank)
+        if d:
+            mark = "" if d.get("verified") else "⚠️ "
+            block = f"<b>{rank}. {mark}{html.escape(d.get('title', ''))}</b>\n{html.escape(d.get('description', ''))}"
+        else:
+            block = f"<b>{rank}. {html.escape(t['name'])}</b>\n<i>ड्राफ्ट नहीं बन पाया</i>"
+        if news[rank - 1]:
+            src = news[rank - 1][0]
+            block += f'\n🔗 <a href="{html.escape(src["link"])}">{html.escape(src["source"] or "source")}</a>'
+        blocks.append(block)
+    messages = ["<b>📝 न्यूज़ ड्राफ्ट</b> — <i>AI ड्राफ्ट है, पब्लिश से पहले सोर्स से पुष्टि करें। ⚠️ = वजह पुष्ट नहीं</i>"]
+    for block in blocks:
+        if len(messages[-1]) + len(block) + 2 > TELEGRAM_LIMIT:
+            messages.append(block)
+        else:
+            messages[-1] += "\n\n" + block
+    return messages
+
+
 def send_whatsapp(text):
     phone = os.environ.get("WHATSAPP_PHONE")
     key = os.environ.get("CALLMEBOT_APIKEY")
@@ -150,9 +242,16 @@ def main():
     trends = latest_trends(fetch(SOURCE_URL))
     message = build_message(trends, load_previous(), TELEGRAM if telegram else WHATSAPP)
     print(message)
+    drafts = draft_messages(trends) if telegram or dry_run else []
+    for d in drafts:
+        print("\n" + d)
     if dry_run:
         return
-    send_telegram(message) if telegram else send_whatsapp(message)
+    if telegram:
+        for text in [message] + drafts:
+            send_telegram(text)
+    else:
+        send_whatsapp(message)
     save_state(trends)
 
 

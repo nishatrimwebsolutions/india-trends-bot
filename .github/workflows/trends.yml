@@ -1,0 +1,34 @@
+name: India X trends to WhatsApp
+
+on:
+  schedule:
+    - cron: "30 3-17 * * *"   # every hour 09:00–23:00 IST (GitHub cron runs in UTC)
+  workflow_dispatch:          # "Run workflow" button for manual tests
+
+concurrency: trends
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore last hour's list (for 🆕 / ⬆️ marks)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: trends-state-${{ github.run_id }}
+          restore-keys: trends-state-
+
+      - name: Fetch trends and send WhatsApp
+        run: python3 trends_bot.py
+        env:
+          WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
+          CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+
+      - name: Save this hour's list
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: trends-state-${{ github.run_id }}

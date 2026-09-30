@@ -21,9 +21,11 @@ jobs:
           key: trends-state-${{ github.run_id }}
           restore-keys: trends-state-
 
-      - name: Fetch trends and send WhatsApp
+      - name: Fetch trends and send (Telegram if its token is set, else WhatsApp)
         run: python3 trends_bot.py
         env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WHATSAPP_PHONE: ${{ secrets.WHATSAPP_PHONE }}
           CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
 

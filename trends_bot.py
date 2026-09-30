@@ -66,9 +66,14 @@ def save_state(trends):
                    "ranks": {t["name"]: i for i, t in enumerate(trends, 1)}}, f, ensure_ascii=False)
 
 
-def build_message(trends, prev):
+WHATSAPP = {"b": lambda s: f"*{s}*", "i": lambda s: f"_{s}_"}
+TELEGRAM = {"b": lambda s: f"<b>{html.escape(s)}</b>", "i": lambda s: f"<i>{html.escape(s)}</i>"}
+
+
+def build_message(trends, prev, fmt=WHATSAPP):
+    b, i = fmt["b"], fmt["i"]
     now = datetime.now(IST).strftime("%I:%M %p").lstrip("0")
-    lines = [f"*🇮🇳 India X Top {len(trends)}* — {now} IST", ""]
+    lines = [f"{b(f'🇮🇳 India X Top {len(trends)}')} — {now} IST", ""]
     for rank, t in enumerate(trends, 1):
         was = prev.get(t["name"])
         if prev and was is None:
@@ -77,16 +82,36 @@ def build_message(trends, prev):
             mark = "⬆️ "
         else:
             mark = ""
-        line = f"{rank}. {mark}*{t['name']}*{short_count(t['count'])}"
+        line = f"{rank}. {mark}{b(t['name'])}{short_count(t['count'])}"
         if was and was != rank and mark:
             line += f" (was #{was})"
         lines.append(line)
         if mark == "🆕 ":
             lines.append("   https://x.com/search?q=" + urllib.parse.quote(t["name"]))
     if not prev:
-        lines += ["", "_First run — 🆕 marks start from next hour._"]
-    lines += ["", "_Source: trends24.in_"]
+        lines += ["", i("First run — 🆕 marks start from next hour.")]
+    lines += ["", i("Source: trends24.in")]
     return "\n".join(lines)
+
+
+def send_telegram(text):
+    token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not chat_id:
+        sys.exit("Set TELEGRAM_CHAT_ID (run: python trends_bot.py --chat-id)")
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                                   "disable_web_page_preview": "true"}).encode()
+    with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", data, timeout=30) as r:
+        print("Telegram:", json.load(r).get("ok"))
+
+
+def print_chat_ids():
+    """After you message your bot once, this prints your chat id."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN") or sys.exit("Set TELEGRAM_BOT_TOKEN first")
+    updates = json.loads(fetch(f"https://api.telegram.org/bot{token}/getUpdates"))["result"]
+    chats = {u["message"]["chat"]["id"]: u["message"]["chat"].get("first_name", "")
+             for u in updates if "message" in u}
+    print(chats or "No messages yet — send your bot any message (e.g. hi) and run again")
 
 
 def send_whatsapp(text):
@@ -104,13 +129,16 @@ def send_whatsapp(text):
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
+    if "--chat-id" in sys.argv:
+        return print_chat_ids()
     dry_run = "--dry-run" in sys.argv
+    telegram = bool(os.environ.get("TELEGRAM_BOT_TOKEN"))
     trends = latest_trends(fetch(SOURCE_URL))
-    message = build_message(trends, load_previous())
+    message = build_message(trends, load_previous(), TELEGRAM if telegram else WHATSAPP)
     print(message)
     if dry_run:
         return
-    send_whatsapp(message)
+    send_telegram(message) if telegram else send_whatsapp(message)
     save_state(trends)
 
 

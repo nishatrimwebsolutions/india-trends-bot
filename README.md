@@ -5,7 +5,15 @@ Every hour from 9 AM to 11 PM IST, this sends the India Top 10 X/Twitter trends 
 
 Stack (all free): trends24.in (public page) · CallMeBot WhatsApp API · GitHub Actions cron.
 
-## Setup
+## Telegram (recommended: free and instant)
+
+1. In Telegram, open **@BotFather** → `/newbot` → pick a name. It gives you a **bot token**.
+2. Open your new bot and send it any message (e.g. `hi`).
+3. Get your chat id: `$env:TELEGRAM_BOT_TOKEN="<token>"; python trends_bot.py --chat-id`
+4. Add GitHub secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, then follow Setup steps 2 and 4 below.
+   When the Telegram token is set, the bot sends to Telegram; otherwise it uses CallMeBot/WhatsApp.
+
+## Setup (WhatsApp via CallMeBot)
 
 1. **CallMeBot API key (one time)**
    - Open https://www.callmebot.com/blog/free-api-whatsapp-messages/ and save the WhatsApp number shown there in your contacts.
